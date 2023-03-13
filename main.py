@@ -62,6 +62,19 @@ def get_user_by_id(discord_id: int) -> User:
             return user
     return None
 
+def get_users_by_name(name: str) -> list[User]:
+    matching_users = []
+    for user in users:
+        if user.name.lower() == name.lower():
+            matching_users.append(user)
+    return matching_users
+
+def get_user_by_nickname(nickname: str) -> User:
+    for user in users:
+        if nickname.lower() in [n.lower() for n in user.nicknames]:
+            return user
+    return None
+
 def generate_person_prompt(person: User) -> str:
     prompt = f"{person.name},"
     prompt == f"their discord id is ({person.discord_id}),"
@@ -106,19 +119,88 @@ async def gpt_conversation(conversation):
 
 # @bot.command()
 # async def teetimerequest(ctx):
-    
 
 
 @bot.command()
-async def fact(ctx, discord_id: int, fact: str):
+async def add_me(ctx, *nicknames: str):
+    name = ctx.author.name
+    discord_id = ctx.author.id
+    create_user(name, nicknames, discord_id)
+    await ctx.send(f"{name} has been added to the user list.")
+
+@bot.command()
+async def add(ctx, name: str, discord_id: str, *nicknames: str, facts = None):
     try:
-        target_user = get_user_by_id(discord_id)
-        if target_user is None:
-            await ctx.send("User not found.")
+        # Try to convert discord_user_tag to int, assuming it's a discord_id
+        user = get_user_by_id(int(discord_id))
+        if user is None:
+            discord_id = int(discord_id.strip("<@!>"))
+            user = get_user_by_id(discord_id)
+    except ValueError:
+        await ctx.send(f":octagonal_sign: The id [{discord_id}] is not valid :octagonal_sign:")
+
+    guild = ctx.guild
+    member = guild.get_member(discord_id)
+    if member is None:
+        await ctx.send(f":octagonal_sign: Could not find user with id [{discord_id}] in this server :octagonal_sign:")
+        return
+    if facts:
+        facts = (",".split(facts))
+        convo_message = f"Facts: {(', '.split(facts))}"
+    new_user = create_user(name, nicknames, discord_id, facts)
+    await ctx.send(f":heavy_plus_sign: {new_user.name} has been added to the user list. :heavy_plus_sign:")
+    
+    convo_message = f"\r\r{new_user.name}[{new_user.discord_id}] has been added to your knowledge base. Their nicknames are {' '.join(new_user.nicknames)}. Say something about this.\r\r" + convo_message
+    conversation.append({'role': 'user', 'content': convo_message})
+    await gpt_conversation(conversation)
+    await ctx.send(conversation[-1]['content'].strip())
+
+def create_user(name: str, nicknames: list[str], discord_id: int, facts = None) -> User:
+    if facts:
+        new_user = User(name=name, nicknames=nicknames, facts=facts, discord_id=discord_id)
+    else:
+        new_user = User(name=name, nicknames=nicknames, facts=[], discord_id=discord_id)
+
+    users.append(new_user)
+    with open(user_file, "r+") as f:
+        data = json.load(f)
+        data["users"].append(new_user.__dict__)
+        f.seek(0)
+        json.dump(data, f, indent=4)
+        f.truncate()
+    return new_user
+
+
+@bot.command()
+async def fact(ctx, discord_user_tag_or_name: str, fact: str):
+    try:
+        # Try to convert discord_user_tag to int, assuming it's a discord_id
+        user = get_user_by_id(discord_user_tag_or_name)
+        if user is None:
+            discord_id = int(discord_user_tag_or_name.strip("<@!>"))
+            user = get_user_by_id(discord_user_tag_or_name)
+    except ValueError:
+        # If the above conversion fails, assume user_id_or_name is a name
+        user = get_users_by_name(discord_user_tag_or_name)
+        if len(user) > 1:
+            await ctx.send(f":octagonal_sign: Multiple people with the name {discord_user_tag_or_name}. Rewrite your request with one of the following users' nicnames or ids in the first field. :octagonal_sign:")
+            for u in user:
+                await ctx.send(f":point_right:\tName: {u.name}\r\t\t  Nicknames: {' '.join(u.nicknames)}\r\t\t  ID: {u.discord_id}")
+        elif user is not None:
+            user = user[0]
+        if user is None:
+            user = get_user_by_nickname(discord_user_tag_or_name)
+            
+        
+    if user is None:
+        await ctx.send("User not found.")
+        return
+    
+    try:
+        if user.fact_exists(fact):
+            await ctx.send(f":interrobang: This fact already exists for {user.name} [{user.id}] :interrobang:")
             return
-        # target_user.add_fact(fact)
-        channel = await bot.fetch_channel(channel_id)
-        await ctx.send(f"The following fact has been suggested for {target_user.name} [{discord_id}]\r\r{fact}\r\rReact with :white_check_mark: to accept or :x: to reject.")
+        await ctx.send(f"The following fact has been suggested for {user.name} [{user.discord_id}]\r\r{fact}\r\rVote with :white_check_mark: to add this fact or :x: to reject.")
         async for msg in ctx.channel.history(limit=1):
             message = msg
         await message.add_reaction("✅")
@@ -134,25 +216,25 @@ async def on_reaction_add(reaction, user):
             return
         message = reaction.message
         if 'The following fact has been suggested for' in message.content:
+            user_id = int(re.search(r'\[(\d+)\]', message.content).group(1))
+            user = get_user_by_id(user_id)
+            if user is None:
+                await message.channel.send("No user found with id [{user_id}]")
+                return
+            fact = message.content.split("\r\r")[1]
+            if user.fact_exists(fact):
+                await message.channel.send(f":interrobang: This fact already exists for {user.name} [{user.id}] :interrobang:")
+                return
             if message.channel.id != channel_id:
                 return
             if (message.reactions[1].count - 1) == fact_votes_needed:
-                await message.channel.send("Fact has been rejected.")
+                await message.channel.send(":thumbsdown: Fact has been rejected :thumbsdown:")
                 return
             if reaction.emoji == "✅":
                 if (message.reactions[0].count - 1) == fact_votes_needed:
-                    user_id = int(re.search(r'\[(\d+)\]', message.content).group(1))
-                    user = get_user_by_id(user_id)
-                    if user is None:
-                        await message.channel.send("No user found with id [{user_id}]")
-                        return
                     
-                    fact = message.content.split("\r\r")[1]
-                    if user.fact_exists(fact):
-                        await message.channel.send("This fact already exists for {user.name} [{user_id}]")
-                        return
                     user.add_fact(fact)
-                    await message.channel.send("Fact has been added.")
+                    await message.channel.send(":thumbsup: Fact has been added :thumbsup:")
                     
                     convo_message = f"\r\r{user.name}[{user.discord_id}] has had follwing fact updated about them. Say something about this.\r\r Fact:{fact}"
                     conversation.append({'role': 'user', 'content': convo_message})
